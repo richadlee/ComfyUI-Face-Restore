@@ -293,8 +293,108 @@ class FaceRestoreModelLoader:
             out = model_loading.load_state_dict(sd).eval()
             return (out, )
 
+class CropSingleFace:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": { 
+            "image": ("IMAGE",),
+            "facedetection": (["retinaface_resnet50", "retinaface_mobile0.25", "YOLOv5l", "YOLOv5n"],)
+        }}
+
+    RETURN_TYPES = ("IMAGE", "FACE_HELPER")
+    FUNCTION = "crop_single_face"
+    CATEGORY = "facerestore_cf"
+
+    def __init__(self):
+        self.face_helper = None
+
+    def crop_single_face(self, image, facedetection):
+        device = model_management.get_torch_device()
+        if self.face_helper is None:
+            self.face_helper = FaceRestoreHelper(
+                1, 
+                face_size=1024,
+                crop_ratio=(1, 1), 
+                det_model=facedetection, 
+                save_ext='png', 
+                use_parse=True, 
+                device=device
+            )
+
+        image_np = 255. * image.cpu().numpy()
+        cur_image_np = image_np[0,:, :, ::-1]  # 只处理第一张图片
+
+        self.face_helper.clean_all()
+        self.face_helper.read_image(cur_image_np)
+        self.face_helper.get_face_landmarks_5(
+            only_center_face=True,  # 只检测中心/最大的人脸
+            resize=640, 
+            eye_dist_threshold=5
+        )
+        self.face_helper.align_warp_face()
+
+        if len(self.face_helper.cropped_faces) == 0:
+            raise ValueError("No face detected in the image")
+
+        # 处理第一个人脸
+        cropped_face = self.face_helper.cropped_faces[0]
+        cropped_face = cv2.cvtColor(cropped_face, cv2.COLOR_BGR2RGB)
+        
+        # 转换为tensor
+        cropped_face_t = torch.from_numpy(cropped_face.astype(np.float32) / 255.0)
+        cropped_face_t = cropped_face_t.unsqueeze(0)  # 添加batch维度
+
+        return (cropped_face_t, self.face_helper)
+    
+class PasteSingleFace:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": { 
+            "original_image": ("IMAGE",),
+            "restored_face": ("IMAGE",),
+            "face_helper": ("FACE_HELPER",),
+        }}
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "paste_face"
+    CATEGORY = "facerestore_cf"
+
+    def paste_face(self, original_image, restored_face, face_helper):
+        if face_helper is None:
+            return (original_image,)
+
+        # 转换restored_face为numpy格式
+        restored_face_np = (restored_face[0].cpu().numpy() * 255).astype(np.uint8)
+        restored_face_np = cv2.cvtColor(restored_face_np, cv2.COLOR_RGB2BGR)
+
+        # 清理之前的restored_faces
+        face_helper.restored_faces = []
+        face_helper.add_restored_face(restored_face_np)
+
+        # 获取逆变换矩阵
+        face_helper.get_inverse_affine(None)
+
+        # 将图像转换为numpy格式
+        original_np = (original_image[0].cpu().numpy() * 255).astype(np.uint8)
+        original_np = cv2.cvtColor(original_np, cv2.COLOR_RGB2BGR)
+
+        # 保存原始图像尺寸
+        face_helper.input_img = original_np
+        
+        # 粘贴回原图
+        restored_img = face_helper.paste_faces_to_input_image()
+        restored_img = cv2.cvtColor(restored_img, cv2.COLOR_BGR2RGB)
+
+        # 转换回tensor格式
+        restored_img_tensor = torch.from_numpy(restored_img.astype(np.float32) / 255.0)
+        restored_img_tensor = restored_img_tensor.unsqueeze(0)
+
+        return (restored_img_tensor,)
+
 NODE_CLASS_MAPPINGS = {
     "FaceRestoreCFWithModel": FaceRestoreCFWithModel,
     "CropFace": CropFace,
     "FaceRestoreModelLoader": FaceRestoreModelLoader,
+    "CropSingleFace": CropSingleFace,     # 新增
+    "PasteSingleFace": PasteSingleFace,   # 新增
 }
