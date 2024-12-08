@@ -295,6 +295,10 @@ class FaceRestoreModelLoader:
 
 class CropSingleFace:
     @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("NaN")
+    # 裁剪单张人脸
+    @classmethod
     def INPUT_TYPES(s):
         return {"required": { 
             "image": ("IMAGE",),
